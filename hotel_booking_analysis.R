@@ -1,0 +1,749 @@
+
+# 1. INSTALL / LOAD REQUIRED PACKAGES
+
+
+# install.packages() only if the packages are not installed.
+# install.packages(c(
+#   "tidyverse",
+#   "janitor",
+#   "skimr",
+#   "ggplot2",
+#   "car",
+#   "broom",
+#   "pROC"
+# ))
+
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(ggplot2)
+library(car)
+library(broom)
+library(pROC)
+
+
+# ------------------------------------------------------------
+# 2. IMPORT DATA
+# ------------------------------------------------------------
+
+hotel <- read.csv("C:/Users/KGN/Downloads/hotel_bookings.csv/hotel_bookings.csv")
+
+# Examine structure
+dim(hotel)
+names(hotel)
+str(hotel)
+head(hotel)
+
+# Basic summary
+summary(hotel)
+skim(hotel)
+
+
+# ------------------------------------------------------------
+# 3. DATA QUALITY ASSESSMENT
+# ------------------------------------------------------------
+
+# Number of missing values in every variable
+missing_values <- sort(colSums(is.na(hotel)), decreasing = TRUE)
+missing_values
+
+# Missing-value percentage
+missing_percent <- data.frame(
+  variable = names(hotel),
+  missing_n = colSums(is.na(hotel)),
+  missing_percent = round(colMeans(is.na(hotel)) * 100, 2)
+)
+
+missing_percent <- missing_percent %>%
+  arrange(desc(missing_percent))
+
+missing_percent
+
+
+# Check duplicated observations
+sum(duplicated(hotel))
+
+# Display duplicates if required
+hotel[duplicated(hotel), ] %>% head()
+
+
+# ------------------------------------------------------------
+# 4. DATA CLEANING
+# ------------------------------------------------------------
+
+hotel_clean <- hotel
+
+# Children has only a very small number of missing observations.
+# One defensible approach is to remove these incomplete records.
+hotel_clean <- hotel_clean %>%
+  filter(!is.na(children))
+
+
+# Country also contains missing values.
+# Assign "Unknown" rather than deleting all such observations.
+hotel_clean$country <- ifelse(
+  is.na(hotel_clean$country),
+  "Unknown",
+  hotel_clean$country
+)
+
+
+# company and agent have substantial missingness.
+# They are not necessary for the primary statistical model,
+# so exclude them from the main analysis.
+hotel_clean <- hotel_clean %>%
+  select(-company, -agent)
+
+
+# IMPORTANT:
+# reservation_status and reservation_status_date reveal the final
+# reservation outcome and therefore would create outcome leakage
+# when explaining/predicting cancellation.
+hotel_clean <- hotel_clean %>%
+  select(-reservation_status, -reservation_status_date)
+
+
+# Create useful variables
+hotel_clean <- hotel_clean %>%
+  mutate(
+    total_nights = stays_in_weekend_nights + stays_in_week_nights,
+    total_guests = adults + children + babies,
+    cancellation = factor(
+      is_canceled,
+      levels = c(0, 1),
+      labels = c("Not Cancelled", "Cancelled")
+    )
+  )
+
+
+# Check impossible / questionable observations
+summary(hotel_clean$total_guests)
+summary(hotel_clean$total_nights)
+summary(hotel_clean$adr)
+
+
+# Remove bookings containing zero guests
+hotel_clean <- hotel_clean %>%
+  filter(total_guests > 0)
+
+
+# Examine ADR before deciding how to handle extreme values
+boxplot(
+  hotel_clean$adr,
+  main = "Distribution of Average Daily Rate",
+  ylab = "ADR"
+)
+
+summary(hotel_clean$adr)
+
+
+# Check final cleaned dataset dimensions
+dim(hotel_clean)
+
+
+# ------------------------------------------------------------
+# 5. DESCRIPTIVE STATISTICS
+# ------------------------------------------------------------
+
+# Overall cancellation frequency
+table(hotel_clean$cancellation)
+
+# Cancellation proportions
+prop.table(table(hotel_clean$cancellation))
+
+# Percentage cancellation
+round(prop.table(table(hotel_clean$cancellation)) * 100, 2)
+
+
+# Descriptive statistics for important numeric variables
+hotel_clean %>%
+  summarise(
+    n = n(),
+    
+    mean_lead_time = mean(lead_time, na.rm = TRUE),
+    median_lead_time = median(lead_time, na.rm = TRUE),
+    sd_lead_time = sd(lead_time, na.rm = TRUE),
+    
+    mean_adr = mean(adr, na.rm = TRUE),
+    median_adr = median(adr, na.rm = TRUE),
+    sd_adr = sd(adr, na.rm = TRUE),
+    
+    mean_total_nights = mean(total_nights, na.rm = TRUE),
+    median_total_nights = median(total_nights, na.rm = TRUE),
+    
+    mean_special_requests =
+      mean(total_of_special_requests, na.rm = TRUE)
+  )
+
+
+# Statistics separately for cancelled/non-cancelled bookings
+hotel_clean %>%
+  group_by(cancellation) %>%
+  summarise(
+    n = n(),
+    mean_lead_time = mean(lead_time),
+    median_lead_time = median(lead_time),
+    sd_lead_time = sd(lead_time),
+    
+    mean_adr = mean(adr),
+    median_adr = median(adr),
+    
+    mean_nights = mean(total_nights),
+    
+    mean_special_requests =
+      mean(total_of_special_requests)
+  )
+
+
+# ------------------------------------------------------------
+# 6. EXPLORATORY DATA ANALYSIS
+# ------------------------------------------------------------
+
+# ---- Figure 1: Overall cancellation distribution ----
+
+ggplot(hotel_clean, aes(x = cancellation)) +
+  geom_bar() +
+  labs(
+    title = "Distribution of Hotel Booking Outcomes",
+    x = "Booking Status",
+    y = "Number of Bookings"
+  ) +
+  theme_minimal()
+
+
+# ---- Figure 2: Cancellation rate by hotel type ----
+
+hotel_clean %>%
+  group_by(hotel) %>%
+  summarise(
+    bookings = n(),
+    cancellations = sum(is_canceled),
+    cancellation_rate = mean(is_canceled) * 100
+  )
+
+
+ggplot(
+  hotel_clean,
+  aes(x = hotel, fill = cancellation)
+) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Cancellation Proportion by Hotel Type",
+    x = "Hotel Type",
+    y = "Proportion",
+    fill = "Booking Status"
+  ) +
+  theme_minimal()
+
+
+# ---- Figure 3: Lead time by cancellation status ----
+
+ggplot(
+  hotel_clean,
+  aes(x = cancellation, y = lead_time)
+) +
+  geom_boxplot() +
+  labs(
+    title = "Lead Time by Booking Cancellation Status",
+    x = "Booking Status",
+    y = "Lead Time (Days)"
+  ) +
+  theme_minimal()
+
+
+# ---- Figure 4: Cancellation by deposit type ----
+
+ggplot(
+  hotel_clean,
+  aes(x = deposit_type, fill = cancellation)
+) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Cancellation Proportion by Deposit Type",
+    x = "Deposit Type",
+    y = "Proportion",
+    fill = "Booking Status"
+  ) +
+  theme_minimal()
+
+
+# ---- Figure 5: Cancellation by market segment ----
+
+ggplot(
+  hotel_clean,
+  aes(x = reorder(market_segment, market_segment),
+      fill = cancellation)
+) +
+  geom_bar(position = "fill") +
+  coord_flip() +
+  labs(
+    title = "Cancellation Proportion by Market Segment",
+    x = "Market Segment",
+    y = "Proportion",
+    fill = "Booking Status"
+  ) +
+  theme_minimal()
+
+
+# ------------------------------------------------------------
+# 7. BUSINESS QUESTION 1
+#
+# Does cancellation rate differ between City Hotel and
+# Resort Hotel?
+#
+# H0: Hotel type and cancellation status are independent.
+# H1: Hotel type and cancellation status are associated.
+#
+# Appropriate test: Chi-square test of independence
+# ------------------------------------------------------------
+
+hotel_cancel_table <- table(
+  hotel_clean$hotel,
+  hotel_clean$cancellation
+)
+
+hotel_cancel_table
+
+
+# Percentages within each hotel type
+prop.table(hotel_cancel_table, margin = 1) * 100
+
+
+# Chi-square test
+chi_hotel <- chisq.test(hotel_cancel_table)
+chi_hotel
+
+
+# Expected cell counts — assumption checking
+chi_hotel$expected
+
+
+# Effect size: Cramer's V
+n <- sum(hotel_cancel_table)
+cramers_v <- sqrt(
+  as.numeric(chi_hotel$statistic) /
+    (n * min(
+      nrow(hotel_cancel_table) - 1,
+      ncol(hotel_cancel_table) - 1
+    ))
+)
+
+cramers_v
+
+
+# ------------------------------------------------------------
+# 8. BUSINESS QUESTION 2
+#
+# Is booking lead time different between cancelled and
+# non-cancelled reservations?
+#
+# H0: Mean lead time is equal for the two groups.
+# H1: Mean lead time differs between the two groups.
+#
+# Appropriate test:
+# Welch independent-samples t-test
+# ------------------------------------------------------------
+
+hotel_clean %>%
+  group_by(cancellation) %>%
+  summarise(
+    n = n(),
+    mean = mean(lead_time),
+    sd = sd(lead_time),
+    median = median(lead_time),
+    IQR = IQR(lead_time)
+  )
+
+
+# Boxplot for distribution/outliers
+ggplot(
+  hotel_clean,
+  aes(x = cancellation, y = lead_time)
+) +
+  geom_boxplot() +
+  labs(
+    title = "Lead Time for Cancelled and Non-Cancelled Bookings",
+    x = "Booking Outcome",
+    y = "Lead Time (Days)"
+  ) +
+  theme_minimal()
+
+
+# Welch t-test
+lead_time_test <- t.test(
+  lead_time ~ cancellation,
+  data = hotel_clean,
+  var.equal = FALSE,
+  conf.level = 0.95
+)
+
+lead_time_test
+
+
+# Confidence interval
+lead_time_test$conf.int
+
+
+# ------------------------------------------------------------
+# 9. EFFECT SIZE FOR LEAD TIME DIFFERENCE
+# ------------------------------------------------------------
+
+lead_stats <- hotel_clean %>%
+  group_by(cancellation) %>%
+  summarise(
+    n = n(),
+    mean = mean(lead_time),
+    sd = sd(lead_time)
+  )
+
+lead_stats
+
+
+# Manually calculate pooled SD for Cohen's d
+n1 <- lead_stats$n[1]
+n2 <- lead_stats$n[2]
+
+m1 <- lead_stats$mean[1]
+m2 <- lead_stats$mean[2]
+
+sd1 <- lead_stats$sd[1]
+sd2 <- lead_stats$sd[2]
+
+pooled_sd <- sqrt(
+  ((n1 - 1) * sd1^2 +
+     (n2 - 1) * sd2^2) /
+    (n1 + n2 - 2)
+)
+
+cohens_d <- (m2 - m1) / pooled_sd
+
+cohens_d
+
+
+# ------------------------------------------------------------
+# 10. PRIMARY INFERENTIAL MODEL:
+# BINARY LOGISTIC REGRESSION
+#
+# Research question:
+# Which booking characteristics are associated with the
+# probability that a reservation will be cancelled?
+#
+# Dependent variable:
+# is_canceled (0 = no, 1 = yes)
+# ------------------------------------------------------------
+
+
+# Convert categorical predictors into factors
+model_data <- hotel_clean %>%
+  mutate(
+    hotel = factor(hotel),
+    meal = factor(meal),
+    market_segment = factor(market_segment),
+    distribution_channel = factor(distribution_channel),
+    is_repeated_guest = factor(is_repeated_guest),
+    deposit_type = factor(deposit_type),
+    customer_type = factor(customer_type),
+    reserved_room_type = factor(reserved_room_type)
+  )
+
+
+# Fit logistic regression
+cancel_model <- glm(
+  is_canceled ~
+    hotel +
+    lead_time +
+    total_nights +
+    adults +
+    children +
+    adr +
+    market_segment +
+    deposit_type +
+    customer_type +
+    is_repeated_guest +
+    previous_cancellations +
+    booking_changes +
+    required_car_parking_spaces +
+    total_of_special_requests,
+  data = model_data,
+  family = binomial(link = "logit")
+)
+
+
+# Model results
+summary(cancel_model)
+
+
+# ------------------------------------------------------------
+# 11. LOGISTIC REGRESSION ODDS RATIOS
+# ------------------------------------------------------------
+
+# Coefficients are on log-odds scale.
+# Exponentiating them produces odds ratios.
+
+odds_ratios <- exp(coef(cancel_model))
+odds_ratios
+
+
+# Odds ratios with 95% confidence intervals
+OR_results <- broom::tidy(
+  cancel_model,
+  exponentiate = TRUE,
+  conf.int = TRUE
+)
+
+OR_results
+
+
+# Display significant predictors
+OR_results %>%
+  filter(p.value < 0.05) %>%
+  arrange(p.value)
+
+
+# ------------------------------------------------------------
+# 12. MULTICOLLINEARITY CHECK
+# ------------------------------------------------------------
+
+# Variance Inflation Factors
+vif_results <- car::vif(cancel_model)
+vif_results
+
+
+
+# ------------------------------------------------------------
+# 13. MODEL PERFORMANCE
+# ------------------------------------------------------------
+
+# Predicted cancellation probability
+model_data$predicted_probability <-
+  predict(cancel_model, type = "response")
+
+
+summary(model_data$predicted_probability)
+
+
+# Classification at 0.50 threshold
+model_data$predicted_class <- ifelse(
+  model_data$predicted_probability >= 0.50,
+  1,
+  0
+)
+
+
+# Confusion matrix
+confusion_matrix <- table(
+  Actual = model_data$is_canceled,
+  Predicted = model_data$predicted_class
+)
+
+confusion_matrix
+
+
+# Accuracy
+accuracy <- sum(diag(confusion_matrix)) /
+  sum(confusion_matrix)
+
+accuracy
+
+
+# ------------------------------------------------------------
+# 14. SENSITIVITY AND SPECIFICITY
+# ------------------------------------------------------------
+
+TN <- confusion_matrix[1, 1]
+FP <- confusion_matrix[1, 2]
+FN <- confusion_matrix[2, 1]
+TP <- confusion_matrix[2, 2]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+precision <- TP / (TP + FP)
+
+accuracy
+sensitivity
+specificity
+precision
+
+
+# ------------------------------------------------------------
+# 15. ROC CURVE AND AUC
+# ------------------------------------------------------------
+
+roc_model <- roc(
+  model_data$is_canceled,
+  model_data$predicted_probability
+)
+
+plot(
+  roc_model,
+  main = "ROC Curve for Booking Cancellation Model"
+)
+
+auc(roc_model)
+
+
+# ------------------------------------------------------------
+# 16. MODEL CONFIDENCE / MODEL COMPARISON
+# ------------------------------------------------------------
+
+# Null model
+null_model <- glm(
+  is_canceled ~ 1,
+  data = model_data,
+  family = binomial
+)
+
+# Likelihood-ratio comparison
+anova(
+  null_model,
+  cancel_model,
+  test = "Chisq"
+)
+
+
+# AIC
+AIC(null_model)
+AIC(cancel_model)
+
+
+# McFadden-style pseudo R-squared
+pseudo_r2 <- 1 -
+  as.numeric(logLik(cancel_model)) /
+  as.numeric(logLik(null_model))
+
+pseudo_r2
+
+
+# ------------------------------------------------------------
+# 17. PREDICTED-PROBABILITY EXAMPLE
+# ------------------------------------------------------------
+
+# DO NOT blindly copy this example into the report.
+# Change the predictor values to scenarios that make sense
+# after examining your actual dataset.
+
+example_booking <- data.frame(
+  hotel = factor("City Hotel",
+                 levels = levels(model_data$hotel)),
+  
+  lead_time = 100,
+  total_nights = 4,
+  adults = 2,
+  children = 0,
+  adr = 100,
+  
+  market_segment = factor(
+    "Online TA",
+    levels = levels(model_data$market_segment)
+  ),
+  
+  deposit_type = factor(
+    "No Deposit",
+    levels = levels(model_data$deposit_type)
+  ),
+  
+  customer_type = factor(
+    "Transient",
+    levels = levels(model_data$customer_type)
+  ),
+  
+  is_repeated_guest = factor(
+    0,
+    levels = levels(model_data$is_repeated_guest)
+  ),
+  
+  previous_cancellations = 0,
+  booking_changes = 0,
+  required_car_parking_spaces = 0,
+  total_of_special_requests = 0
+)
+
+
+predict(
+  cancel_model,
+  newdata = example_booking,
+  type = "response"
+)
+
+
+# ------------------------------------------------------------
+# 18. ADDITIONAL DESCRIPTIVE TABLE FOR BUSINESS DISCUSSION
+# ------------------------------------------------------------
+
+segment_summary <- hotel_clean %>%
+  group_by(market_segment) %>%
+  summarise(
+    bookings = n(),
+    cancelled = sum(is_canceled),
+    cancellation_rate =
+      round(mean(is_canceled) * 100, 2),
+    mean_lead_time =
+      round(mean(lead_time), 2),
+    mean_adr =
+      round(mean(adr), 2)
+  ) %>%
+  arrange(desc(cancellation_rate))
+
+segment_summary
+
+
+# Deposit-type cancellation summary
+deposit_summary <- hotel_clean %>%
+  group_by(deposit_type) %>%
+  summarise(
+    bookings = n(),
+    cancelled = sum(is_canceled),
+    cancellation_rate =
+      round(mean(is_canceled) * 100, 2)
+  ) %>%
+  arrange(desc(cancellation_rate))
+
+deposit_summary
+
+
+# Hotel-type summary
+hotel_summary <- hotel_clean %>%
+  group_by(hotel) %>%
+  summarise(
+    bookings = n(),
+    cancelled = sum(is_canceled),
+    cancellation_rate =
+      round(mean(is_canceled) * 100, 2),
+    mean_lead_time =
+      round(mean(lead_time), 2),
+    mean_adr =
+      round(mean(adr), 2)
+  )
+
+hotel_summary
+
+
+# ------------------------------------------------------------
+# 19. SAVE KEY OUTPUTS
+# ------------------------------------------------------------
+
+write.csv(
+  OR_results,
+  "logistic_regression_odds_ratios.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  segment_summary,
+  "market_segment_summary.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  hotel_summary,
+  "hotel_summary.csv",
+  row.names = FALSE
+)
+
+
+# ------------------------------------------------------------
+# 20. SESSION INFORMATION
+# ------------------------------------------------------------
+
+# Useful for reproducibility / GitHub documentation
+sessionInfo()
